@@ -91,7 +91,7 @@ Mind2Web2-polish/
 
 ## 📝 Citation
 
-If you find this work useful, please cite our paper:
+If you find this work useful, please consider starring our repo and citing our papers:
 
 ```bibtex
 @misc{gou2025mind2web2,
