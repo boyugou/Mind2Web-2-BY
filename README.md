@@ -80,13 +80,13 @@ Before running evaluation, you may want to precache the webpages to reduce evalu
 Use the following script to precache:
 
 ```bash
-# TODO
+# Coming Soon!
 ```
 
 We also provide this lightweight script to fix the errors in the precached webpages (for example, some pages may be blocked by human verification):
 
 ```bash
-# TODO
+# Coming Soon!
 ```
 
 ### 4. Run Evaluation
@@ -94,7 +94,7 @@ We also provide this lightweight script to fix the errors in the precached webpa
 Execute the evaluation process:
 
 ```bash
-# TODO
+# Coming Soon!
 ```
 
 
