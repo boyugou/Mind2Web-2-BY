@@ -15,7 +15,7 @@ Mind2Web 2 is an evaluation framework for agentic search capabilities, featuring
 
 ## 🆕 Updates
 
-- **2025/06/26**: Website is live. The manuscript is archived on arXiv and accepted to ICML'25 Workshop on Computer Use Agents.
+- **2025/06/26**: The GitHub repo is live. The manuscript is archived on arXiv and accepted to ICML'25 Workshop on Computer Use Agents.
 
 ## ⚙️ Environment Setup
 
