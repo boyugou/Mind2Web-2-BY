@@ -4,7 +4,7 @@ Mind2Web 2 is an evaluation framework for agentic search capabilities, featuring
 
 <div align="center">
   <img src="./assets/mind2web2_overview.jpg" alt="Mind2Web 2 Overview" width="800"/>
-  <p><em>Overview of Mind2Web 2: Evaluating Agentic Search with Agent-as-a-Judge</em></p>
+  <p><em>Mind2Web 2 features realistic and diverse long-horizon web search tasks and a novel Agent-as-a-Judge framework to evaluate complex, time-varying, and citation-backed answers.</em></p>
 </div>
 
 ## 🔗 Links
@@ -15,7 +15,7 @@ Mind2Web 2 is an evaluation framework for agentic search capabilities, featuring
 
 ## 🆕 Updates
 
-- **2025/06/26**: The GitHub repo is live. The manuscript is now on arXiv and accepted to ICML'25 Workshop on Computer Use Agents.
+- **2025/06/26**: The GitHub repo is live. The manuscript is now on arXiv.
 
 ## ⚙️ Environment Setup
 
