@@ -1,4 +1,4 @@
-# Mind2Web 2 (WIP)
+# Mind2Web 2 (ETA Jun. 27)
 
 
 - [🏠Homepage](https://osu-nlp-group.github.io/Mind2Web-2)
