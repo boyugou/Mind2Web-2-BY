@@ -103,7 +103,3 @@ If you find this work useful, please cite our paper:
     primaryClass = {cs.AI}
 }
 ```
-
-## 📄 License
-
-This project is licensed under the terms specified in the [LICENSE](LICENSE) file.
