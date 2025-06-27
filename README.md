@@ -33,6 +33,23 @@ pip install -e .
 playwright install
 ```
 
+## 📁 Repo Structure
+
+```
+Mind2Web2-polish/
+├── dataset/                 # Evaluation data and results
+├── mind2web2/              # Main package
+│   ├── api_tools/          # External API tools
+│   ├── llm_client/         # LLM client implementations
+│   ├── utils/              # Utility functions
+│   ├── eval_runner.py      # Evaluation execution
+│   ├── eval_toolkit.py     # Evaluation toolkit and utilities
+│   ├── evaluator.py        # Core evaluation logic
+│   └── verification_tree.py # Rubric tree implementation
+├── pyproject.toml          # Package configuration
+└── README.md              # This file
+```
+
 ## 🚀 Run Evaluation
 
 ### 1. Prepare Your Data
@@ -58,7 +75,15 @@ export GOOGLE_MAPS_API_KEY="YOUR_GOOGLE_MAPS_API_KEY"
 
 ### 3. Precache Webpages
 
-Before running evaluation, you may want to precache the webpages to improve evaluation speed:
+Before running evaluation, you may want to precache the webpages to reduce evaluation latency. Loading webpages on-the-fly is very inefficient. 
+
+Use the following script to precache:
+
+```bash
+# TODO
+```
+
+We also provide this lightweight script to fix the errors in the precached webpages (for example, some pages may be blocked by human verification):
 
 ```bash
 # TODO
@@ -72,22 +97,6 @@ Execute the evaluation process:
 # TODO
 ```
 
-## 📁 Project Structure
-
-```
-Mind2Web2-polish/
-├── dataset/                 # Evaluation data and results
-├── mind2web2/              # Main package
-│   ├── api_tools/          # External API tools
-│   ├── llm_client/         # LLM client implementations
-│   ├── utils/              # Utility functions
-│   ├── eval_runner.py      # Evaluation execution
-│   ├── eval_toolkit.py     # Evaluation toolkit and utilities
-│   ├── evaluator.py        # Core evaluation logic
-│   └── verification_tree.py # Rubric tree implementation
-├── pyproject.toml          # Package configuration
-└── README.md              # This file
-```
 
 ## 📝 Citation
 
