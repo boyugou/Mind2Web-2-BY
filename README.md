@@ -1,6 +1,6 @@
 # Mind2Web 2
 
-Mind2Web 2 is an evaluation framework for agentic search capabilities, featuring Agent-as-a-Judge methodology for comprehensive assessment of web automation agents.
+Mind2Web 2 is a benchmark for agentic search systems, featuring Agent-as-a-Judge methodology for comprehensive, rigorous, and reliable assessment.
 
 <div align="center">
   <img src="./assets/mind2web2_overview.jpg" alt="Mind2Web 2 Overview" width="800"/>
