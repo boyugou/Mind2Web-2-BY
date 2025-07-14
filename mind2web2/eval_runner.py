@@ -6,7 +6,7 @@ import traceback
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 
 from tqdm import tqdm
 
@@ -15,25 +15,6 @@ from .utils.logging_setup import create_logger, cleanup_logger
 from .utils.load_eval_script import load_eval_script
 
 import re
-
-
-def _all_answer_paths(task_root: Path) -> List[Path]:
-    """Return a *sorted* list of every answer file under <answer_dir>/<task_id>/<agent>/<answer_file>."""
-
-    priority = {"human": 0, "hf_open_deep_research": -1, "openai_deep_research": 1}
-
-    agent_dirs = sorted(
-        (d for d in task_root.iterdir() if d.is_dir()),
-        key=lambda p: (priority.get(p.name, 2), p.name),
-    )
-
-    paths: List[Path] = []
-    for agent_dir in agent_dirs:
-        paths.extend(sorted(p for p in agent_dir.iterdir() if p.is_file()))
-    return paths
-
-
-
 
 
 def _answer_base(answer_name: str) -> str:
@@ -75,6 +56,7 @@ async def _eval_one_answer(
         eval_fn,
         client,
         task_id: str,
+        agent_name: str,
         answer_path: Path,
         cache: CacheClass,
         semaphore: asyncio.Semaphore,
@@ -83,7 +65,6 @@ async def _eval_one_answer(
 ):
     """Evaluate a single answer file and write its result JSON / logs."""
 
-    agent_name = answer_path.parent.name
     answer_name = answer_path.name
     answer_base = _answer_base(answer_name)
 
@@ -204,6 +185,7 @@ def _save_result_json(result: Dict, task_out_dir: Path, ts: str, is_debug: bool)
 async def evaluate_task(
         client,
         task_id: str,
+        agent_name: str,
         answer_dir: Union[str, Path],
         cache_dir: Union[str, Path],
         output_dir: Union[str, Path],
@@ -211,33 +193,58 @@ async def evaluate_task(
         dump_cache: bool = True,
         is_self_debug: bool = False,
         overwrite: bool = False,
-        max_concurrent_answers: int = 6,  # How many answer files can be under evaluation at the same time
-        semaphore: int = 10,  # The maximum parallelism **inside a single answer evaluation** (passed as
-        # an `asyncio.Semaphore` to `eval_fn`).
-):
-    """Evaluate *all* answers of a task with two‑level concurrency control.
+        max_concurrent_answers: int = 6,
+        semaphore: Optional[asyncio.Semaphore] = None,
+) -> List[Dict]:
+    """Evaluate all answers for a specific task and agent.
 
     Parameters
     ----------
+    client : LLMClient
+        The LLM client to use for evaluation
+    task_id : str
+        The task identifier
+    agent_name : str
+        The agent name to evaluate
+    answer_dir : Union[str, Path]
+        Base directory containing answers (structure: <answer_dir>/<agent_name>/<task_id>/answer_*.md)
+    cache_dir : Union[str, Path]
+        Directory for cache files
+    output_dir : Union[str, Path]
+        Directory for output results
+    script_path : Union[str, Path]
+        Path to the evaluation script
+    dump_cache : bool, default True
+        Whether to persist cache to disk
+    is_self_debug : bool, default False
+        Whether to add debug suffix to logs/results
+    overwrite : bool, default False
+        Whether to overwrite existing results
     max_concurrent_answers : int, default 6
-        How many answer files can be under evaluation at the same time.
-    semaphore : int, default 10
-        The maximum parallelism **inside a single answer evaluation** (passed as
-        an `asyncio.Semaphore` to `eval_fn`).
+        Maximum number of concurrent answer evaluations
+    semaphore : Optional[asyncio.Semaphore], default None
+        External semaphore for controlling concurrency (if None, uses max_concurrent_answers)
 
-    Other parameters keep their original meanings.
+    Returns
+    -------
+    List[Dict]
+        List of evaluation results for all answers
     """
 
     # ------------------------------------------------------------------
     # 0. Setup paths & ensure dirs exist
     # ------------------------------------------------------------------
-    answer_root = Path(answer_dir) / task_id
+    answer_root = Path(answer_dir) / agent_name / task_id
     output_root = Path(output_dir)
     cache_root = Path(cache_dir)
 
-    answer_root.mkdir(parents=True, exist_ok=True)
     output_root.mkdir(parents=True, exist_ok=True)
     cache_root.mkdir(parents=True, exist_ok=True)
+
+    # Check if answer directory exists
+    if not answer_root.exists():
+        print(f"⚠️ No answers found for {agent_name}/{task_id} at {answer_root}")
+        return []
 
     # ------------------------------------------------------------------
     # 1. Create main task logger (for overall progress tracking)
@@ -245,18 +252,18 @@ async def evaluate_task(
     main_log_dir = output_root / task_id / "main_logs"
     main_log_dir.mkdir(parents=True, exist_ok=True)
     main_logger, main_timestamp = create_logger(
-        f"main_{task_id}",
+        f"main_{task_id}_{agent_name}",
         str(main_log_dir),
         enable_console=True  # Main logger can output to console
     )
 
     try:
         main_logger.info(
-            f"🎯 Starting task evaluation: {task_id}",
+            f"🎯 Starting task evaluation: {task_id} for agent: {agent_name}",
             extra={
                 "task_id": task_id,
+                "agent_name": agent_name,
                 "max_concurrent_answers": max_concurrent_answers,
-                "inner_semaphore": semaphore,
                 "operation": "task_start"
             }
         )
@@ -275,30 +282,39 @@ async def evaluate_task(
         # ------------------------------------------------------------------
         # 3. Collect answer files
         # ------------------------------------------------------------------
-        answer_paths = _all_answer_paths(answer_root)
+        answer_paths = sorted([p for p in answer_root.iterdir() if p.is_file() and p.suffix == ".md"])
         main_logger.info(
             f"📁 Found {len(answer_paths)} answer files to evaluate",
             extra={
                 "answer_count": len(answer_paths),
-                "answer_paths": [f"{p.parent.name}/{p.name}" for p in answer_paths]
+                "answer_paths": [p.name for p in answer_paths]
             }
         )
-        print("-->> Answer Root:", answer_root)
-        print("-->> Answers to Eval:", answer_paths)
+        print(f"-->> Answer Root: {answer_root}")
+        print(f"-->> Answers to Eval: {[p.name for p in answer_paths]}")
+
+        if not answer_paths:
+            main_logger.warning(f"No answer files found in {answer_root}")
+            return []
 
         ok_results: List[Dict] = []
 
         # ------------------------------------------------------------------
-        # 4. Concurrency primitives
+        # 4. Concurrency control
         # ------------------------------------------------------------------
-        outer_semaphore = asyncio.Semaphore(max_concurrent_answers)
+        if semaphore is None:
+            outer_semaphore = asyncio.Semaphore(max_concurrent_answers)
+        else:
+            outer_semaphore = semaphore
 
+        # Inner semaphore for each answer evaluation
+        inner_semaphore_value = 10  # Default inner parallelism
+        
         # ------------------------------------------------------------------
         # 5. Define per‑answer coroutine
         # ------------------------------------------------------------------
         async def _process_answer(ans_path: Path):
-            async with outer_semaphore:  # Control concurrency inside answer
-                agent_name = ans_path.parent.name
+            async with outer_semaphore:  # Control concurrent answer evaluations
                 answer_name = ans_path.name
                 answer_base = _answer_base(answer_name)
 
@@ -358,12 +374,13 @@ async def evaluate_task(
                         traceback.print_exception(type(exc), exc, exc.__traceback__)
 
                 # 5‑C. Real evaluation
-                inner_semaphore = asyncio.Semaphore(semaphore)
+                inner_semaphore = asyncio.Semaphore(inner_semaphore_value)
                 try:
                     res = await _eval_one_answer(
                         eval_fn,
                         client,
                         task_id,
+                        agent_name,
                         ans_path,
                         cache,
                         inner_semaphore,
@@ -413,7 +430,7 @@ async def evaluate_task(
         tasks = [asyncio.create_task(_process_answer(p)) for p in answer_paths]
 
         completed_count = 0
-        for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"[{task_id}] Evaluating"):
+        for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"[{task_id}/{agent_name}] Evaluating"):
             res = await coro
             completed_count += 1
 
@@ -442,19 +459,21 @@ async def evaluate_task(
                 )
 
         # ------------------------------------------------------------------
-        # 7. Persist cache & merge summary
+        # 7. Persist cache & save summary
         # ------------------------------------------------------------------
         if dump_cache:
             cache.dump(str(cache_path))
             main_logger.info("💾 Cache dumped successfully")
 
-        _merge_and_save_summary(output_root / task_id, ok_results)
+        # Save summary for this agent/task combination
+        _save_agent_task_summary(output_root / task_id / agent_name, ok_results)
         main_logger.info("📊 Summary saved successfully")
 
         main_logger.info(
             f"🎉 Task evaluation completed: {len(ok_results)}/{len(answer_paths)} successful results",
             extra={
                 "task_id": task_id,
+                "agent_name": agent_name,
                 "successful_count": len(ok_results),
                 "total_count": len(answer_paths),
                 "success_rate": len(ok_results) / len(answer_paths) if answer_paths else 0,
@@ -469,6 +488,7 @@ async def evaluate_task(
             f"💥 Task evaluation failed: {e}",
             extra={
                 "task_id": task_id,
+                "agent_name": agent_name,
                 "error_type": type(e).__name__,
                 "operation": "task_error"
             }
@@ -483,30 +503,62 @@ async def evaluate_task(
 
 
 # --------------------------------------------------------------------------- #
-# Summary helper                                                              #
+# Summary helpers                                                             #
 # --------------------------------------------------------------------------- #
 
 
-def _merge_and_save_summary(task_out_dir: Path, all_results: List[Dict]):
-    """Aggregate per‑answer results into task‑level summary."""
-
-    merged: Dict[str, Dict[str, Dict]] = defaultdict(dict)
-    for res in all_results:
-        agent = res["agent_name"]
-        answer = res["answer_name"]
-        merged[agent][answer] = {
+def _save_agent_task_summary(agent_task_dir: Path, results: List[Dict]):
+    """Save summary for a specific agent/task combination."""
+    if not results:
+        return
+    
+    summary = []
+    for res in sorted(results, key=lambda x: x.get("answer_name", "")):
+        summary.append({
+            "answer_name": res["answer_name"],
             "score": float(res["final_score"]),
             "status": "success" if res["final_score"] > 0 else "failed",
             "success": res["final_score"] == 1,
-        }
-
-    summary = {
-        agent: [
-            {"answer_name": ans, **info}
-            for ans, info in sorted(answers.items())
-        ]
-        for agent, answers in sorted(merged.items())
-    }
-
-    with (task_out_dir / "result.json").open("w", encoding="utf-8") as fp:
+        })
+    
+    with (agent_task_dir / "summary.json").open("w", encoding="utf-8") as fp:
         json.dump(summary, fp, ensure_ascii=False, indent=4)
+
+
+def merge_all_results(output_dir: Union[str, Path]) -> Dict[str, Dict[str, List[Dict]]]:
+    """Merge all evaluation results across tasks and agents.
+    
+    Returns a nested dictionary: {task_id: {agent_name: [results]}}
+    """
+    output_root = Path(output_dir)
+    merged_results = defaultdict(lambda: defaultdict(list))
+    
+    # Iterate through all task directories
+    for task_dir in output_root.iterdir():
+        if not task_dir.is_dir():
+            continue
+        task_id = task_dir.name
+        
+        # Iterate through all agent directories within each task
+        for agent_dir in task_dir.iterdir():
+            if not agent_dir.is_dir() or agent_dir.name == "main_logs":
+                continue
+            agent_name = agent_dir.name
+            
+            # Look for summary.json
+            summary_file = agent_dir / "summary.json"
+            if summary_file.exists():
+                try:
+                    with summary_file.open("r", encoding="utf-8") as fp:
+                        results = json.load(fp)
+                        merged_results[task_id][agent_name] = results
+                except Exception as e:
+                    print(f"Failed to load summary from {summary_file}: {e}")
+    
+    # Save merged results
+    merged_file = output_root / "all_results.json"
+    with merged_file.open("w", encoding="utf-8") as fp:
+        json.dump(dict(merged_results), fp, ensure_ascii=False, indent=4)
+    
+    print(f"📊 Merged results saved to {merged_file}")
+    return dict(merged_results)
