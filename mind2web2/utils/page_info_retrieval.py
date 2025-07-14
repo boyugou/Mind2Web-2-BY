@@ -3,19 +3,13 @@ import asyncio
 import base64
 import hashlib
 import random
-import re
-import ssl
 import time
 from io import BytesIO
 from logging import Logger
 from pathlib import Path
 from typing import Optional, Tuple, Union
-from urllib.parse import urlparse, unquote
 
 # Third-party imports
-import certifi
-import httpx
-import requests
 from PIL import Image
 from playwright.async_api import (
     BrowserContext,
@@ -23,6 +17,8 @@ from playwright.async_api import (
     async_playwright,
 )
 from pydantic import HttpUrl
+
+from mind2web2.api_tools.tool_pdf import is_pdf, format_url
 from mind2web2.utils.logging_setup import create_logger
 
 
@@ -42,17 +38,6 @@ BLANK_IMG_B64 = make_blank_png_b64()
 ERROR_TEXT = "\u26A0\ufe0f This URL could not be loaded (navigation error)."
 
 
-def format_url(url: Union[str, Path]) -> str:
-    text = str(url)
-    if text.endswith("?utm_source=chatgpt.com"):
-        text = text.replace("?utm_source=chatgpt.com", "")
-        print("REMOVED GPT SUFFIX")
-    if not re.match(r'^(?:https?|ftp)://', text):
-        return f'https://{text}'
-    return text
-
-
-
 # User-agent pools
 DEFAULT_USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -62,219 +47,6 @@ DEFAULT_USER_AGENTS = [
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
 ]
-
-USER_AGENT_STRINGS = [
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 OPR/109.0.0.0',
-]
-
-# ================================ PDF Detection Functions ================================
-
-
-#TODO: There still can be fake PDFs. For those cases, we should just make a blank PDF for them.
-def is_pdf_by_suffix(url: str) -> bool:
-    """Check if URL likely points to PDF based on path/query patterns."""
-    parsed = urlparse(url.lower())
-    path = unquote(parsed.path)
-
-    # Direct .pdf extension
-    if path.endswith('.pdf'):
-        return True
-    
-    # Common PDF URL patterns
-    pdf_patterns = [
-        'arxiv.org/pdf/',
-        '/download/pdf',
-        '/fulltext.pdf',
-        '/article/pdf',
-        '/content/pdf',
-        'type=pdf',
-        'format=pdf',
-        'download=pdf',
-        '.pdf?',
-        '/pdf/',
-        'pdfviewer',
-    ]
-    
-    url_lower = url.lower()
-    return any(pattern in url_lower for pattern in pdf_patterns)
-
-def is_pdf_by_requests_head(url: str, timeout: int = 10) -> bool:
-    """Check PDF via HEAD request with proper error handling."""
-    try:
-        headers = {
-            "User-Agent": random.choice(USER_AGENT_STRINGS),
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-        }
-        
-        # Create SSL context that's more permissive
-        session = requests.Session()
-        session.verify = certifi.where()
-        
-        resp = session.head(
-            url, 
-            allow_redirects=True, 
-            timeout=timeout, 
-            headers=headers,
-            verify=False  # Less strict SSL verification
-        )
-        
-        content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        
-        # Check various PDF content types
-        pdf_types = [
-            "application/pdf",
-            "application/x-pdf",
-            "application/acrobat",
-            "applications/vnd.pdf",
-            "text/pdf",
-            "text/x-pdf"
-        ]
-        
-        return any(pdf_type in content_type for pdf_type in pdf_types)
-        
-    except requests.exceptions.SSLError as e:
-        print(f"[is_pdf_requests_head] SSL error for {url}: {type(e).__name__}")
-        return False
-    except requests.exceptions.ConnectionError as e:
-        print(f"[is_pdf_requests_head] Connection error for {url}: {type(e).__name__}")
-        return False
-    except requests.exceptions.Timeout as e:
-        print(f"[is_pdf_requests_head] Timeout error for {url}: {type(e).__name__}")
-        return False
-    except Exception as e:
-        print(f"[is_pdf_requests_head] Unexpected error for {url}: {type(e).__name__}: {e}")
-        return False
-
-async def is_pdf_by_httpx_get_range(url: str, timeout: int = 10) -> bool:
-    """Check PDF via partial GET request to read file header."""
-    try:
-        # Configure httpx with custom SSL context
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=timeout,
-            verify=False,
-            limits=httpx.Limits(max_redirects=10)
-        ) as client:
-            
-            headers = {
-                "User-Agent": random.choice(USER_AGENT_STRINGS),
-                "Range": "bytes=0-1023",  # Get first 1KB to check magic number
-                "Accept": "*/*",
-            }
-            
-            r = await client.get(url, headers=headers)
-            
-            # First check Content-Type
-            ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
-            if "pdf" in ctype:
-                return True
-            
-            # If we got content, check PDF magic number
-            if r.content:
-                # PDF files start with %PDF-
-                return r.content.startswith(b'%PDF-')
-                
-    except httpx.TimeoutException:
-        print(f"[is_pdf_httpx_get_range] Timeout for {url}")
-        return False
-    except httpx.ConnectError:
-        print(f"[is_pdf_httpx_get_range] Connection error for {url}")
-        return False
-    except Exception as e:
-        print(f"[is_pdf_httpx_get_range] Error for {url}: {type(e).__name__}: {e}")
-        return False
-
-async def is_pdf_by_full_get(url: str, timeout: int = 15) -> bool:
-    """Last resort: download beginning of file to check magic number."""
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=timeout,
-            verify=False
-        ) as client:
-            
-            headers = {
-                "User-Agent": random.choice(USER_AGENT_STRINGS),
-                "Accept": "*/*",
-            }
-            
-            # Stream the response to avoid downloading large files
-            async with client.stream('GET', url, headers=headers) as response:
-                # Read first 5 bytes to check PDF magic number
-                chunk = await response.aread(5)
-                if chunk and chunk.startswith(b'%PDF-'):
-                    return True
-                    
-                # Also check Content-Type from response
-                ctype = response.headers.get("content-type", "").split(";")[0].strip().lower()
-                return "pdf" in ctype
-                
-    except Exception as e:
-        print(f"[is_pdf_by_full_get] Error for {url}: {type(e).__name__}: {e}")
-        return False
-
-async def is_pdf(url: str, logger: Logger = None) -> bool:
-    """
-    Robustly detect if a URL points to a PDF file using multiple strategies.
-    
-    Args:
-        url: The URL to check
-        logger: Optional logger instance
-        
-    Returns:
-        bool: True if URL points to a PDF, False otherwise
-    """
-    url = format_url(url)
-    
-    if logger:
-        logger.debug(f"Checking if URL is PDF: {url}")
-    
-    # 1. Fast URL pattern check
-    if is_pdf_by_suffix(url):
-        if logger:
-            logger.info(f"URL pattern indicates PDF: {url}")
-        else:
-            print(f"{url} IS a PDF (by URL pattern)")
-        return True
-    
-    # 2. Try HEAD request first (fastest network check)
-    if is_pdf_by_requests_head(url):
-        if logger:
-            logger.info(f"HEAD request confirms PDF: {url}")
-        else:
-            print(f"{url} IS a PDF (by HEAD request)")
-        return True
-    
-    # 3. Try partial GET with magic number check
-    if await is_pdf_by_httpx_get_range(url):
-        if logger:
-            logger.info(f"Partial GET confirms PDF: {url}")
-        else:
-            print(f"{url} IS a PDF (by partial GET)")
-        return True
-    
-    # 4. Last resort: stream beginning of file
-    if await is_pdf_by_full_get(url):
-        if logger:
-            logger.info(f"Full GET confirms PDF: {url}")
-        else:
-            print(f"{url} IS a PDF (by full GET)")
-        return True
-    
-    # Not a PDF
-    if logger:
-        logger.debug(f"URL is not a PDF: {url}")
-    else:
-        print(f"{url} IS NOT a PDF")
-    return False
 
 
 class PageManager:
@@ -375,7 +147,6 @@ async def capture_page_content_async(
         headless: bool= True,
         user_data_dir: Union[str, Path] = None,
         grant_permissions: bool = True,
-        detector_model: str ="gpt-4.1-mini"
 ) -> Tuple[Optional[str], Optional[str]]:
     # ----------- prepare persistent context dir -----------
     if user_data_dir is None:
@@ -398,6 +169,7 @@ async def capture_page_content_async(
         context = await p.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
             # channel="chrome",
+            locale='en-US',
             headless=headless,
             ignore_https_errors=True,
             args=[
@@ -497,7 +269,6 @@ async def capture_page_content_async(
                     },
                 )
                 page_text = text_res.get("result", {}).get("value")
-
                 elapsed = time.time() - start_ts
                 logger.debug(f"Completed capture for {target} in {elapsed:.2f}s")
                 return screenshot_b64, page_text
@@ -517,18 +288,45 @@ async def capture_page_content_async(
 
 
 
-if __name__ == '__main__':
+async def test_pdf_detection():
+    """Test PDF detection functionality."""
     logger, _ = create_logger(__name__, r"tmp")
-    test_url = 'https://www.akc.org/dog-breeds/west-highland-white-terrier/'
-    shot_b64, text = asyncio.run(capture_page_content_async(test_url, logger, headless=False))
-    print(text)
-    if shot_b64:
-        Path('screenshot.png').write_bytes(base64.b64decode(shot_b64))
-        logger.info('Saved screenshot.png')
-    if text:
-        Path('page.txt').write_text(text, encoding='utf-8')
-        logger.info('Saved page.txt')
-#
-#
-# if __name__ == "__main__":
-#     asyncio.run(is_pdf("https://www.nobelprize.org/prizes/physics/2004/wilczek/biographical/"))
+    
+    # Test URLs
+    test_urls = [
+        "https://www.fhwa.dot.gov/policyinformation/statistics/2023/pdf/mv1.pdf",  # Should be PDF
+        "https://arxiv.org/pdf/2301.00001.pdf",  # Should be PDF (arxiv)
+        "https://www.google.com",  # Should NOT be PDF
+        "https://example.com/document.pdf",  # Should be PDF by suffix
+    ]
+    
+    print("🧪 Testing PDF detection functionality...")
+    print("=" * 50)
+    
+    for url in test_urls:
+        print(f"\n🔍 Testing: {url}")
+        try:
+            result = await is_pdf(url, logger)
+            status = "✅ IS PDF" if result else "❌ NOT PDF"
+            print(f"   Result: {status}")
+        except Exception as e:
+            print(f"   Error: {e}")
+    
+    print("\n" + "=" * 50)
+    print("✅ PDF detection test completed!")
+
+if __name__ == '__main__':
+    # Run the async test function
+    asyncio.run(test_pdf_detection())
+    
+    # Optional: Test webpage capture (commented out by default)
+    # logger, _ = create_logger(__name__, r"tmp")
+    # test_url = 'https://www.akc.org/dog-breeds/west-highland-white-terrier/'
+    # shot_b64, text = asyncio.run(capture_page_content_async(test_url, logger, headless=False))
+    # print(text)
+    # if shot_b64:
+    #     Path('screenshot.png').write_bytes(base64.b64decode(shot_b64))
+    #     logger.info('Saved screenshot.png')
+    # if text:
+    #     Path('page.txt').write_text(text, encoding='utf-8')
+    #     logger.info('Saved page.txt')

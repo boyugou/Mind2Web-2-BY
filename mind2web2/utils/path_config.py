@@ -51,13 +51,13 @@ class PathConfig:
 
         # Dataset
         self.dataset_root = self.project_root / "dataset"
-        self.answers_root = self.dataset_root / "answers"
+        self.answers_root = self.project_root / "answers"
 
         self.eval_scripts_root = self.project_root / "eval_scripts"
-        self.tasks_root = self.dataset_root / "tasks"
-        self.eval_results_root = self.dataset_root / "eval_results"
+        self.tasks_root = self.project_root / "tasks"
+        self.eval_results_root = self.project_root / "eval_results"
 
-        self.cache_root = self.dataset_root / "cache"
+        self.cache_root = self.project_root / "cache"
 
         # Scripts
         self.run_eval_script = self.project_root / "run_eval.py"

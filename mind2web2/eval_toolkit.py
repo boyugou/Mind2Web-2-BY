@@ -1,22 +1,25 @@
 from __future__ import annotations
-import re
+
 import asyncio
+import base64
+import io
 import logging
 import random
 import textwrap
+import uuid
 from typing import List, Type, Callable, Awaitable, Optional, Tuple, Union
-from pydantic import BaseModel
-import base64, io
+
 from PIL import Image
+from pydantic import BaseModel
+
 from .api_tools import tool_pdf
 from .llm_client.base_client import LLMClient
 from .utils.cache import CacheClass
 from .utils.misc import (
-    text_dedent,normalize_url_markdown
+    text_dedent, normalize_url_markdown
 )
 from .utils.page_info_retrieval import capture_page_content_async, is_pdf
 from .verification_tree import VerificationNode
-import uuid
 
 
 class BinaryEvalResult(BaseModel):
@@ -35,9 +38,9 @@ class EvaluatorConfig:
     default_use_screenshot: bool = True
     default_additional_instruction: str = "None"
 
+
 class BaseEvaluator:
     """Common utilities shared by Extractor & Verifier."""
-
 
     def __init__(
             self,
@@ -64,7 +67,9 @@ class BaseEvaluator:
     async def call_llm_with_semaphore(self, **kwargs):
         if "o" not in kwargs["model"]:
             kwargs["temperature"] = 0.0
-        async with self.semaphore:
+        # Use LLM semaphore if available, fallback to default semaphore
+        semaphore_to_use = getattr(self.semaphore, 'llm', self.semaphore)
+        async with semaphore_to_use:
             return await self.client.async_response(**kwargs)
 
     def _build_message_content(self, prompt: str, screenshot_b64: List[str], use_screenshot: bool = True):
@@ -83,7 +88,6 @@ class BaseEvaluator:
             return msg_content
         else:
             return [{"type": "text", "text": prompt}]
-
 
     async def get_page_info(self, url: str, cancellation_event: Optional[asyncio.Event] = None):
         """Return (screenshot_b64, page_text). Uses global cache + semaphore."""
@@ -113,16 +117,20 @@ class BaseEvaluator:
                 except Exception as e:
                     self.logger.info(f"Fail to extract PDF from {url}: {e}")
                     self.logger.info(f"Lets try extract from webpage by playwright on {url}")
-                    async with self.semaphore:
+                    # Use webpage semaphore if available, fallback to default semaphore
+                    webpage_semaphore = getattr(self.semaphore, 'webpage', self.semaphore)
+                    async with webpage_semaphore:
                         screenshot_b64, page_text = await capture_page_content_async(
                             url,
                             self.logger,
-                            headless=False,
+                            headless=True,
                         )
                         self.cache.put_text(url, page_text)
                         self.cache.put_screenshot(url, screenshot_b64)
                 if page_text is None:
-                    async with self.semaphore:
+                    # Use webpage semaphore if available, fallback to default semaphore
+                    webpage_semaphore = getattr(self.semaphore, 'webpage', self.semaphore)
+                    async with webpage_semaphore:
                         await asyncio.sleep(0.2 * random.random())
                         screenshot_b64, page_text = await capture_page_content_async(
                             url,
@@ -134,7 +142,9 @@ class BaseEvaluator:
 
 
             else:
-                async with self.semaphore:
+                # Use webpage semaphore if available, fallback to default semaphore
+                webpage_semaphore = getattr(self.semaphore, 'webpage', self.semaphore)
+                async with webpage_semaphore:
                     await asyncio.sleep(0.2 * random.random())
                     screenshot_b64, page_text = await capture_page_content_async(
                         url,
@@ -152,7 +162,6 @@ class BaseEvaluator:
             )
         if not isinstance(screenshot_b64, list):
             screenshot_b64 = [screenshot_b64]
-
 
         def _resize_b64_image(b64_str: str) -> str:
             try:
@@ -425,6 +434,7 @@ class Extractor(BaseEvaluator):
         # Execute extraction
         return await self._log_and_extract(template_class, message_content, extract_context)
 
+
 class Verifier(BaseEvaluator):
     """Responsible for evidence‑based claim verification."""
 
@@ -467,7 +477,6 @@ class Verifier(BaseEvaluator):
             {additional_instruction}
             ```
             """)
-
 
     URL_PROMPT = text_dedent("""
                             You are responsible for verifying whether a given claim or "fact" is fully supported by the actual content of a specified webpage (or a PDF file from a PDF webpage). For context, we are examining the correctness of an answer to a web information-gathering task. Typically, the claim or "fact" is extracted directly from the answer, and the webpage provided is the URL source referenced in the answer. This verification step helps us determine whether the claim or "fact" in the answer is accurate or hallucinated, a common issue in LLM-based systems. You will receive both the text content and a screenshot of the webpage for examination. Your task is to provide a binary judgment (i.e., supported or not supported) along with clear and detailed reasoning for your decision.
@@ -559,8 +568,6 @@ class Verifier(BaseEvaluator):
             num_trials=kwargs.get('num_trials') or self.config.default_num_trials,
             use_screenshot=kwargs.get('use_screenshot', self.config.default_use_screenshot),
         )
-
-
 
     async def _execute_verification(
             self,
@@ -943,6 +950,8 @@ class Verifier(BaseEvaluator):
             node.status = "failed"
 
         return False
+
+
 # Factory function
 def create_evaluator(
         *,

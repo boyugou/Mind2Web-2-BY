@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import traceback
 from collections import defaultdict
 from datetime import datetime
@@ -11,10 +12,26 @@ from typing import Dict, List, Union, Optional
 from tqdm import tqdm
 
 from .utils.cache import CacheClass
-from .utils.logging_setup import create_logger, cleanup_logger
 from .utils.load_eval_script import load_eval_script
+from .utils.logging_setup import create_logger, cleanup_logger
 
-import re
+
+class DualSemaphore:
+    """Wrapper to hold both webpage and LLM semaphores."""
+
+    def __init__(self, webpage_semaphore: asyncio.Semaphore, llm_semaphore: asyncio.Semaphore):
+        self.webpage = webpage_semaphore
+        self.llm = llm_semaphore
+        # Default to webpage semaphore for backward compatibility
+        self._default = webpage_semaphore
+
+    async def __aenter__(self):
+        """For backward compatibility with code expecting a single semaphore."""
+        return await self._default.__aenter__()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """For backward compatibility with code expecting a single semaphore."""
+        return await self._default.__aexit__(exc_type, exc_val, exc_tb)
 
 
 def _answer_base(answer_name: str) -> str:
@@ -59,7 +76,8 @@ async def _eval_one_answer(
         agent_name: str,
         answer_path: Path,
         cache: CacheClass,
-        semaphore: asyncio.Semaphore,
+        webpage_semaphore: asyncio.Semaphore,
+        llm_semaphore: asyncio.Semaphore,
         output_dir: Path,
         is_self_debug: bool = False,
 ):
@@ -69,7 +87,7 @@ async def _eval_one_answer(
     answer_base = _answer_base(answer_name)
 
     # ---------- Create isolated logging ----------
-    log_dir = output_dir / task_id / agent_name / answer_base / "logs"
+    log_dir = output_dir / agent_name / task_id / answer_base / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Use a more specific logger name to ensure uniqueness
@@ -110,30 +128,29 @@ async def _eval_one_answer(
 
     result = None
     try:
-        # Log waiting outside the semaphore
-        logger.debug("Waiting for evaluation semaphore")
+        # Create a dual semaphore wrapper for the eval function
+        dual_semaphore = DualSemaphore(webpage_semaphore, llm_semaphore)
 
-        async with semaphore:  # Control concurrency inside eval_fn
-            logger.info("🔄 Starting evaluation function")
+        logger.info("🔄 Starting evaluation function")
 
-            result: Dict = await eval_fn(
-                client=client,
-                answer=answer_text,
-                agent_name=agent_name,
-                answer_name=answer_name,
-                cache=cache,
-                semaphore=semaphore,
-                logger=logger,
-                model="o4-mini",
-            )
+        result: Dict = await eval_fn(
+            client=client,
+            answer=answer_text,
+            agent_name=agent_name,
+            answer_name=answer_name,
+            cache=cache,
+            semaphore=dual_semaphore,
+            logger=logger,
+            model="o4-mini",
+        )
 
-            logger.info(
-                f"✅ Evaluation completed with score: {result.get('final_score', 'unknown')}",
-                extra={
-                    "final_score": result.get("final_score"),
-                    "operation": "eval_complete"
-                }
-            )
+        logger.info(
+            f"✅ Evaluation completed with score: {result.get('final_score', 'unknown')}",
+            extra={
+                "final_score": result.get("final_score"),
+                "operation": "eval_complete"
+            }
+        )
 
     except Exception as exc:
         logger.exception(
@@ -154,7 +171,7 @@ async def _eval_one_answer(
     # ---------- Save result ----------
     try:
         if result is not None:
-            _save_result_json(result, output_dir / task_id, timestamp, is_self_debug)
+            _save_result_json(result, output_dir / agent_name / task_id, timestamp, is_self_debug)
     except Exception as e:
         print(f"Failed to save result for {agent_name}/{answer_name}: {e}")
         return e
@@ -162,14 +179,13 @@ async def _eval_one_answer(
     return result
 
 
-def _save_result_json(result: Dict, task_out_dir: Path, ts: str, is_debug: bool):
+def _save_result_json(result: Dict, agent_task_out_dir: Path, ts: str, is_debug: bool):
     """Write per‑answer result JSON to disk."""
 
-    agent = result["agent_name"]
     answer = result["answer_name"]
     answer_base = _answer_base(answer)
 
-    save_dir = task_out_dir / agent / answer_base / "results"
+    save_dir = agent_task_out_dir / answer_base / "results"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     fname = f"{ts}_{answer}{'_debug' if is_debug else ''}.json"
@@ -193,8 +209,9 @@ async def evaluate_task(
         dump_cache: bool = True,
         is_self_debug: bool = False,
         overwrite: bool = False,
-        max_concurrent_answers: int = 6,
-        semaphore: Optional[asyncio.Semaphore] = None,
+        max_concurrent_answers: int = 3,
+        webpage_semaphore: Optional[asyncio.Semaphore] = None,
+        llm_semaphore: Optional[asyncio.Semaphore] = None,
 ) -> List[Dict]:
     """Evaluate all answers for a specific task and agent.
 
@@ -220,10 +237,12 @@ async def evaluate_task(
         Whether to add debug suffix to logs/results
     overwrite : bool, default False
         Whether to overwrite existing results
-    max_concurrent_answers : int, default 6
+    max_concurrent_answers : int, default 3
         Maximum number of concurrent answer evaluations
-    semaphore : Optional[asyncio.Semaphore], default None
-        External semaphore for controlling concurrency (if None, uses max_concurrent_answers)
+    webpage_semaphore : Optional[asyncio.Semaphore], default None
+        Semaphore for controlling concurrent webpage retrieval operations
+    llm_semaphore : Optional[asyncio.Semaphore], default None
+        Semaphore for controlling concurrent LLM API requests
 
     Returns
     -------
@@ -249,7 +268,7 @@ async def evaluate_task(
     # ------------------------------------------------------------------
     # 1. Create main task logger (for overall progress tracking)
     # ------------------------------------------------------------------
-    main_log_dir = output_root / task_id / "main_logs"
+    main_log_dir = output_root / agent_name / task_id / "main_logs"
     main_log_dir.mkdir(parents=True, exist_ok=True)
     main_logger, main_timestamp = create_logger(
         f"main_{task_id}_{agent_name}",
@@ -276,7 +295,6 @@ async def evaluate_task(
 
         cache_path = cache_root / f"{task_id}.pkl"
         cache = CacheClass(cache_path=str(cache_path))
-        cache.merge(str(cache_root / "gt_urls.pkl"))
         main_logger.info(f"💾 Cache loaded from {cache_path}")
 
         # ------------------------------------------------------------------
@@ -302,14 +320,15 @@ async def evaluate_task(
         # ------------------------------------------------------------------
         # 4. Concurrency control
         # ------------------------------------------------------------------
-        if semaphore is None:
-            outer_semaphore = asyncio.Semaphore(max_concurrent_answers)
-        else:
-            outer_semaphore = semaphore
+        # Use an outer semaphore to control concurrent answer evaluations
+        outer_semaphore = asyncio.Semaphore(max_concurrent_answers)
 
-        # Inner semaphore for each answer evaluation
-        inner_semaphore_value = 10  # Default inner parallelism
-        
+        # Create default semaphores if not provided
+        if webpage_semaphore is None:
+            webpage_semaphore = asyncio.Semaphore(5)  # Default webpage limit
+        if llm_semaphore is None:
+            llm_semaphore = asyncio.Semaphore(30)  # Default LLM limit
+
         # ------------------------------------------------------------------
         # 5. Define per‑answer coroutine
         # ------------------------------------------------------------------
@@ -328,15 +347,16 @@ async def evaluate_task(
                 )
                 print(f"👉 Starting {agent_name} {answer_name}")
 
-                # 5‑A. Copy original md to workspace (if not copied yet)
-                dst_md = output_root / task_id / agent_name / answer_name
+                # 5‑A. Copy original md to answer folder (if not copied yet)
+                answer_folder = output_root / agent_name / task_id / answer_base
+                dst_md = answer_folder / answer_name
                 if not dst_md.exists():
-                    dst_md.parent.mkdir(parents=True, exist_ok=True)
+                    answer_folder.mkdir(parents=True, exist_ok=True)
                     dst_md.write_bytes(ans_path.read_bytes())
                     main_logger.debug(f"📋 Copied answer file to {dst_md}")
 
                 # 5‑B. Result reuse check
-                result_dir = dst_md.parent / answer_base / "results"
+                result_dir = answer_folder / "results"
                 latest = _latest_json(result_dir)
                 if latest and not overwrite:
                     main_logger.info(
@@ -374,7 +394,6 @@ async def evaluate_task(
                         traceback.print_exception(type(exc), exc, exc.__traceback__)
 
                 # 5‑C. Real evaluation
-                inner_semaphore = asyncio.Semaphore(inner_semaphore_value)
                 try:
                     res = await _eval_one_answer(
                         eval_fn,
@@ -383,7 +402,8 @@ async def evaluate_task(
                         agent_name,
                         ans_path,
                         cache,
-                        inner_semaphore,
+                        webpage_semaphore,
+                        llm_semaphore,
                         output_root,
                         is_self_debug,
                     )
@@ -466,7 +486,7 @@ async def evaluate_task(
             main_logger.info("💾 Cache dumped successfully")
 
         # Save summary for this agent/task combination
-        _save_agent_task_summary(output_root / task_id / agent_name, ok_results)
+        _save_agent_task_summary(output_root / agent_name / task_id, ok_results)
         main_logger.info("📊 Summary saved successfully")
 
         main_logger.info(
@@ -511,7 +531,7 @@ def _save_agent_task_summary(agent_task_dir: Path, results: List[Dict]):
     """Save summary for a specific agent/task combination."""
     if not results:
         return
-    
+
     summary = []
     for res in sorted(results, key=lambda x: x.get("answer_name", "")):
         summary.append({
@@ -520,7 +540,7 @@ def _save_agent_task_summary(agent_task_dir: Path, results: List[Dict]):
             "status": "success" if res["final_score"] > 0 else "failed",
             "success": res["final_score"] == 1,
         })
-    
+
     with (agent_task_dir / "summary.json").open("w", encoding="utf-8") as fp:
         json.dump(summary, fp, ensure_ascii=False, indent=4)
 
@@ -532,21 +552,21 @@ def merge_all_results(output_dir: Union[str, Path]) -> Dict[str, Dict[str, List[
     """
     output_root = Path(output_dir)
     merged_results = defaultdict(lambda: defaultdict(list))
-    
-    # Iterate through all task directories
-    for task_dir in output_root.iterdir():
-        if not task_dir.is_dir():
+
+    # Iterate through all agent directories
+    for agent_dir in output_root.iterdir():
+        if not agent_dir.is_dir():
             continue
-        task_id = task_dir.name
-        
-        # Iterate through all agent directories within each task
-        for agent_dir in task_dir.iterdir():
-            if not agent_dir.is_dir() or agent_dir.name == "main_logs":
+        agent_name = agent_dir.name
+
+        # Iterate through all task directories within each agent
+        for task_dir in agent_dir.iterdir():
+            if not task_dir.is_dir():
                 continue
-            agent_name = agent_dir.name
-            
+            task_id = task_dir.name
+
             # Look for summary.json
-            summary_file = agent_dir / "summary.json"
+            summary_file = task_dir / "summary.json"
             if summary_file.exists():
                 try:
                     with summary_file.open("r", encoding="utf-8") as fp:
@@ -554,11 +574,11 @@ def merge_all_results(output_dir: Union[str, Path]) -> Dict[str, Dict[str, List[
                         merged_results[task_id][agent_name] = results
                 except Exception as e:
                     print(f"Failed to load summary from {summary_file}: {e}")
-    
+
     # Save merged results
     merged_file = output_root / "all_results.json"
     with merged_file.open("w", encoding="utf-8") as fp:
         json.dump(dict(merged_results), fp, ensure_ascii=False, indent=4)
-    
+
     print(f"📊 Merged results saved to {merged_file}")
     return dict(merged_results)
