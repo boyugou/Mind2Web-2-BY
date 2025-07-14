@@ -54,4 +54,4 @@ include-package-data = true          # Include non-.py files in the package
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["mind2web2*"]
-exclude = ["code_gen*", "InfoVisualizer*", "dataset*", "eval_scripts*", "scripts*"]
+exclude = ["dataset*", "eval_scripts*", "scripts*"]

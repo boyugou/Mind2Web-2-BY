@@ -1,48 +1,32 @@
+# Standard library imports
 import asyncio
+import base64
 import hashlib
+import random
 import re
+import ssl
 import time
+from io import BytesIO
 from logging import Logger
 from pathlib import Path
 from typing import Optional, Tuple, Union
+from urllib.parse import urlparse, unquote
 
+# Third-party imports
+import certifi
+import httpx
+import requests
+from PIL import Image
 from playwright.async_api import (
-    async_playwright,
     BrowserContext,
     Page,
+    async_playwright,
 )
 from pydantic import HttpUrl
-import base64
-from io import BytesIO
-
-from mind2web2.llm_client.azure_openai_client import AsyncAzureOpenAIClient
 from mind2web2.utils.logging_setup import create_logger
 
-from PIL import Image   # pip install pillow
 
-
-
-################################################################################
-# ────────────────────────── MANUAL‑SCRAPE CONSTANTS ───────────────────────────
-################################################################################
-
-# 1) only block StoryGraph for now – you can add more domains later
-BLACKLIST_PATTERNS = {
-    r"^https?://(?:www\.)?app\.thestorygraph\.com/.*",
-}
-BLACKLIST_RE = re.compile("|".join(BLACKLIST_PATTERNS), re.I)
-
-# 2) English message shown to downstream caller if the URL is on the list
-MANUAL_TEXT = (
-    "\u26A0\ufe0f This site uses advanced human‑verification. "
-    "Please open it in a regular browser, complete any checks, and save the page as MHTML before continuing."
-)
-
-
-def is_blacklisted(url: str) -> bool:
-    """Return True if *url* matches any pattern in `BLACKLIST_PATTERNS`."""
-    return bool(BLACKLIST_RE.match(url))
-
+# ================================ Constants ================================
 
 def make_blank_png_b64() -> str:
     # Create 1×1 RGBA fully transparent pixel
@@ -53,42 +37,24 @@ def make_blank_png_b64() -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-################################################################################
-# ──────────────────────────────── CONSTANTS ──────────────────────────────────
-################################################################################
-
+# Error handling constants
 BLANK_IMG_B64 = make_blank_png_b64()
 ERROR_TEXT = "\u26A0\ufe0f This URL could not be loaded (navigation error)."
-
-
-# ==== Stealth JS to evade automation detection ====
-STEALTH_JS = r"""
-window.navigator.chrome = {runtime: {}};
-Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-"""
-
-default_extra_headers = {
-    'sec-ch-ua': '"Chromium";v="113", "Google Chrome";v="113"',
-    'accept-language': 'en-US,en;q=0.9',
-}
 
 
 def format_url(url: Union[str, Path]) -> str:
     text = str(url)
     if text.endswith("?utm_source=chatgpt.com"):
-        text= text.replace("?utm_source=chatgpt.com","")
+        text = text.replace("?utm_source=chatgpt.com", "")
         print("REMOVED GPT SUFFIX")
     if not re.match(r'^(?:https?|ftp)://', text):
         return f'https://{text}'
-
     return text
 
 
 
-
-# User-agent pool and default headers
-default_user_agents = [
+# User-agent pools
+DEFAULT_USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 '
@@ -97,122 +63,218 @@ default_user_agents = [
     '(KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
 ]
 
-user_agent_strings = [
+USER_AGENT_STRINGS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    # 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 OPR/109.0.0.0',
 ]
 
-extra_headers_template = {
-    'sec-ch-ua': '\"Chromium\";v=\"130\", \"Google Chrome\";v=\"130\", \"Not?A_Brand\";v=\"99\"',
-    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-    'accept-Language': 'en-US,en;q=0.9'
-}
+# ================================ PDF Detection Functions ================================
 
-import httpx
-import random
-from urllib.parse import urlparse
 
-#
-# async def is_pdf(url: str) -> bool:
-#     if url.lower().endswith(".pdf"):
-#         return True
-#     url = format_url(url)
-#
-#     # 1) quick path-suffix heuristic
-#     if urlparse(url).path.lower().endswith(".pdf"):
-#         return True
-#
-#     try:
-#         async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-#             # 2) try RANGE GET instead of HEAD (safer across CDNs)
-#             extra_headers = extra_headers_template.copy()
-#             extra_headers["user-agent"] = random.choice(user_agent_strings)
-#             extra_headers["Range"] = "bytes=0-0"
-#
-#             r = await client.get(url, headers=extra_headers)
-#             ctype = r.headers.get("content-type", "").split(";")[0].strip()
-#             return ctype == "application/pdf"
-#
-#     except httpx.RequestError as e:
-#         print(f"[is_pdf] network error: {type(e).__name__}: {e}")
-#         print(f"[is_pdf] network error ({e}); fallback to False – URL: {url}")
-#         return False
-
-import asyncio
-import httpx
-import requests
-import random
-from urllib.parse import urlparse
-
+#TODO: There still can be fake PDFs. For those cases, we should just make a blank PDF for them.
 def is_pdf_by_suffix(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(".pdf") or ("arxiv" in url and "pdf" in url)
+    """Check if URL likely points to PDF based on path/query patterns."""
+    parsed = urlparse(url.lower())
+    path = unquote(parsed.path)
 
-def is_pdf_by_requests_head(url: str) -> bool:
+    # Direct .pdf extension
+    if path.endswith('.pdf'):
+        return True
+    
+    # Common PDF URL patterns
+    pdf_patterns = [
+        'arxiv.org/pdf/',
+        '/download/pdf',
+        '/fulltext.pdf',
+        '/article/pdf',
+        '/content/pdf',
+        'type=pdf',
+        'format=pdf',
+        'download=pdf',
+        '.pdf?',
+        '/pdf/',
+        'pdfviewer',
+    ]
+    
+    url_lower = url.lower()
+    return any(pattern in url_lower for pattern in pdf_patterns)
+
+def is_pdf_by_requests_head(url: str, timeout: int = 10) -> bool:
+    """Check PDF via HEAD request with proper error handling."""
     try:
-        resp = requests.head(url, allow_redirects=True, timeout=8, headers={
-            "User-Agent": random.choice(user_agent_strings)
-        })
+        headers = {
+            "User-Agent": random.choice(USER_AGENT_STRINGS),
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+        }
+        
+        # Create SSL context that's more permissive
+        session = requests.Session()
+        session.verify = certifi.where()
+        
+        resp = session.head(
+            url, 
+            allow_redirects=True, 
+            timeout=timeout, 
+            headers=headers,
+            verify=False  # Less strict SSL verification
+        )
+        
         content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        return content_type == "application/pdf"
+        
+        # Check various PDF content types
+        pdf_types = [
+            "application/pdf",
+            "application/x-pdf",
+            "application/acrobat",
+            "applications/vnd.pdf",
+            "text/pdf",
+            "text/x-pdf"
+        ]
+        
+        return any(pdf_type in content_type for pdf_type in pdf_types)
+        
+    except requests.exceptions.SSLError as e:
+        print(f"[is_pdf_requests_head] SSL error for {url}: {type(e).__name__}")
+        return False
+    except requests.exceptions.ConnectionError as e:
+        print(f"[is_pdf_requests_head] Connection error for {url}: {type(e).__name__}")
+        return False
+    except requests.exceptions.Timeout as e:
+        print(f"[is_pdf_requests_head] Timeout error for {url}: {type(e).__name__}")
+        return False
     except Exception as e:
-        print(f"[is_pdf_requests_head] error: {type(e).__name__}: {e}")
-        return False  # continue fallback
-
-async def is_pdf_by_httpx_get(url: str) -> bool:
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
-            r = await client.get(url, headers={
-                "User-Agent": random.choice(user_agent_strings),
-                "Range": "bytes=0-0"
-            })
-            ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
-            return ctype == "application/pdf"
-    except httpx.RequestError as e:
-        print(f"[is_pdf_httpx_get] network error: {type(e).__name__}: {e}")
+        print(f"[is_pdf_requests_head] Unexpected error for {url}: {type(e).__name__}: {e}")
         return False
 
-async def is_pdf(url: str) -> bool:
+async def is_pdf_by_httpx_get_range(url: str, timeout: int = 10) -> bool:
+    """Check PDF via partial GET request to read file header."""
+    try:
+        # Configure httpx with custom SSL context
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=timeout,
+            verify=False,
+            limits=httpx.Limits(max_redirects=10)
+        ) as client:
+            
+            headers = {
+                "User-Agent": random.choice(USER_AGENT_STRINGS),
+                "Range": "bytes=0-1023",  # Get first 1KB to check magic number
+                "Accept": "*/*",
+            }
+            
+            r = await client.get(url, headers=headers)
+            
+            # First check Content-Type
+            ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
+            if "pdf" in ctype:
+                return True
+            
+            # If we got content, check PDF magic number
+            if r.content:
+                # PDF files start with %PDF-
+                return r.content.startswith(b'%PDF-')
+                
+    except httpx.TimeoutException:
+        print(f"[is_pdf_httpx_get_range] Timeout for {url}")
+        return False
+    except httpx.ConnectError:
+        print(f"[is_pdf_httpx_get_range] Connection error for {url}")
+        return False
+    except Exception as e:
+        print(f"[is_pdf_httpx_get_range] Error for {url}: {type(e).__name__}: {e}")
+        return False
+
+async def is_pdf_by_full_get(url: str, timeout: int = 15) -> bool:
+    """Last resort: download beginning of file to check magic number."""
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=timeout,
+            verify=False
+        ) as client:
+            
+            headers = {
+                "User-Agent": random.choice(USER_AGENT_STRINGS),
+                "Accept": "*/*",
+            }
+            
+            # Stream the response to avoid downloading large files
+            async with client.stream('GET', url, headers=headers) as response:
+                # Read first 5 bytes to check PDF magic number
+                chunk = await response.aread(5)
+                if chunk and chunk.startswith(b'%PDF-'):
+                    return True
+                    
+                # Also check Content-Type from response
+                ctype = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                return "pdf" in ctype
+                
+    except Exception as e:
+        print(f"[is_pdf_by_full_get] Error for {url}: {type(e).__name__}: {e}")
+        return False
+
+async def is_pdf(url: str, logger: Logger = None) -> bool:
+    """
+    Robustly detect if a URL points to a PDF file using multiple strategies.
+    
+    Args:
+        url: The URL to check
+        logger: Optional logger instance
+        
+    Returns:
+        bool: True if URL points to a PDF, False otherwise
+    """
     url = format_url(url)
-
-    # 1. fast suffix check
+    
+    if logger:
+        logger.debug(f"Checking if URL is PDF: {url}")
+    
+    # 1. Fast URL pattern check
     if is_pdf_by_suffix(url):
-        print(f"{url} IS a PDF")
+        if logger:
+            logger.info(f"URL pattern indicates PDF: {url}")
+        else:
+            print(f"{url} IS a PDF (by URL pattern)")
         return True
-
-    # 2. requests HEAD (sync, reliable)
+    
+    # 2. Try HEAD request first (fastest network check)
     if is_pdf_by_requests_head(url):
-        print(f"{url} IS a PDF")
+        if logger:
+            logger.info(f"HEAD request confirms PDF: {url}")
+        else:
+            print(f"{url} IS a PDF (by HEAD request)")
         return True
-
-    # 3. httpx GET fallback
-    if await is_pdf_by_httpx_get(url):
-        print(f"{url} IS a PDF")
+    
+    # 3. Try partial GET with magic number check
+    if await is_pdf_by_httpx_get_range(url):
+        if logger:
+            logger.info(f"Partial GET confirms PDF: {url}")
+        else:
+            print(f"{url} IS a PDF (by partial GET)")
         return True
-
-    # 4. Final fallback: Playwright or manual detection
-    # Here, you can optionally integrate Playwright-based capture + type inspection
-    print(f"{url} IS NOT a PDF")
+    
+    # 4. Last resort: stream beginning of file
+    if await is_pdf_by_full_get(url):
+        if logger:
+            logger.info(f"Full GET confirms PDF: {url}")
+        else:
+            print(f"{url} IS a PDF (by full GET)")
+        return True
+    
+    # Not a PDF
+    if logger:
+        logger.debug(f"URL is not a PDF: {url}")
+    else:
+        print(f"{url} IS NOT a PDF")
     return False
-
-async def _retry_async(
-        func, retries: int = 3, delay: float = 1.0, backoff: float = 2.0, logger: Logger = None
-):
-    attempt = 1
-    while True:
-        try:
-            return await func()
-        except Exception as e:
-            if attempt >= retries:
-                if logger:
-                    logger.error(f"Final attempt {attempt} failed: {e}")
-                raise
-            if logger:
-                logger.warning(f"Attempt {attempt} failed: {e}, retrying in {delay}s...")
-            await asyncio.sleep(delay)
-            delay *= backoff
-            attempt += 1
 
 
 class PageManager:
@@ -309,8 +371,8 @@ class BlockingPopupError(RuntimeError):
 async def capture_page_content_async(
         url: HttpUrl,
         logger: Logger,
-        wait_until: str = "networkidle",
-        headless: bool= False,  # ← Default becomes True
+        wait_until: str = "load",
+        headless: bool= True,
         user_data_dir: Union[str, Path] = None,
         grant_permissions: bool = True,
         detector_model: str ="gpt-4.1-mini"
@@ -324,16 +386,18 @@ async def capture_page_content_async(
 
     target = format_url(url)
 
-    user_agent = random.choice(default_user_agents)
-    headers = {**default_extra_headers, "user-agent": user_agent}
+    user_agent = random.choice(DEFAULT_USER_AGENTS)
+    headers = {"user-agent": user_agent}
 
     screenshot_b64=make_blank_png_b64()
     page_text=ERROR_TEXT
 
+
+    # Set location. Set Language to English
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
-            channel="chrome",
+            # channel="chrome",
             headless=headless,
             ignore_https_errors=True,
             args=[
@@ -347,8 +411,8 @@ async def capture_page_content_async(
                 "--ignore-certificate-errors",
                 "--safebrowsing-disable-auto-save",
                 "--safebrowsing-disable-download-protection",
-                '--password-store=basic',  # Use plain text basic storage instead of Keychain
-                '--use-mock-keychain',  # Tell Chrome not to actually access Keychain
+                '--password-store=basic',
+                '--use-mock-keychain',
             ],
             extra_http_headers=headers,
             viewport={
@@ -356,7 +420,6 @@ async def capture_page_content_async(
                 "height": random.randint(700, 800),
             },
         )
-        await context.add_init_script(STEALTH_JS)
         if grant_permissions:
             try:
                 await context.grant_permissions(
@@ -374,13 +437,11 @@ async def capture_page_content_async(
                 logger.error(f'Failed to grant permissions: {e}')
 
         mgr = PageManager(context, logger)
-        page = await mgr.get()
-        await page.goto("https://www.google.com/", wait_until='load', timeout=15000)
         # page = await mgr.get()
-        cdp = await context.new_cdp_session(page)
-        await cdp.send("Page.enable")
-        await cdp.send("DOM.enable")
-        await cdp.send("Runtime.enable")
+        # cdp = await context.new_cdp_session(page)
+        # await cdp.send("Page.enable")
+        # await cdp.send("DOM.enable")
+        # await cdp.send("Runtime.enable")
 
         start_ts = time.time()
         try:
@@ -391,94 +452,10 @@ async def capture_page_content_async(
             try:
                 await navigate()
             except Exception as e:
-                logger.error(f"Navigation failed (Timeout is fine): {e}")
-
-            # ---------- viewport screenshot ----------
-            try:
-
-                logger.info("Reset CDP to the latest page")
-                page = await mgr.get()
-                cdp = await context.new_cdp_session(page)
-                vp_shot = await cdp.send(
-                    "Page.captureScreenshot", {"format": "png"}
-                )
-                vp_b64 = vp_shot.get("data")
-            except Exception as e:
-                logger.error(f"Failed to capture screenshot: {e}")
-                logger.error(f"Lets use blank information for: {target}")
-                return BLANK_IMG_B64,ERROR_TEXT
-
-            # ---------- blocking-popup detection ----------
-            from pydantic import BaseModel
-
-            class PopupEvalResult(BaseModel):
-                thoughts: str
-                blocking: bool
-                reason: str
-
-            llm = AsyncAzureOpenAIClient()
-            prompt_headless = (
-                "You are a scraping assistant. Given a screenshot of the current "
-                "viewport, determine whether there is a major blocking popup overlay that would prevent accurate scraping of the "
-                "main content. A minor floating element that does not block the "
-                "main content is fine (i.e., blocking = False). If you find human "
-                "verification, ignore and proceed, i.e. blocking=False."
-            )
-
-            prompt_headful = (
-                "You are a scraping assistant. Given a screenshot of the current "
-                "viewport, determine whether there is a major blocking popup overlay that would prevent accurate scraping of the "
-                "main content. A minor floating element that does not block the "
-                "main content is fine (i.e., blocking = False).\nA speciail case is human verification or totally get blocked by the website. If you find the current website is blocked by human detector, just proceed with blocking = False."
-            )
-
-            try:
-                verification_result = await llm.response(
-                    model=detector_model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt_headless if headless else prompt_headful},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{vp_b64}",
-                                        "detail": "high",
-                                    },
-                                },
-                            ],
-                        }
-                    ],
-                    response_format=PopupEvalResult,
-                    temperature=0.0,
-                )
-                if verification_result.blocking and headless == True:
-                    logger.warning(
-                        f"Blocking detected on {target} during Headless Mode:\n {verification_result.thoughts} \n {verification_result.blocking} \n {verification_result.reason}"
-                    )
-                    logger.warning(
-                        f"Raising a BlockingPopupError"
-                    )
-                    raise BlockingPopupError(verification_result.reason)
-                elif verification_result.blocking and headless == False:
-                    logger.warning(
-                        f"Blocking detected on {target} during HeadFUL Mode:\n {verification_result.thoughts} \n {verification_result.blocking} \n {verification_result.reason}"
-                    )
-                    page = await mgr.get()
-                    await page.pause()
-
-
-
-            except BlockingPopupError:
-                logger.error(f"Blocking detected on {target}:\n {verification_result.thoughts} \n {verification_result.blocking} \n {verification_result.reason}")
-                return None,None,None
-            except Exception as e:
-                logger.error(f'Failed to call LM Blocker Detector, likely because the url is bad {url}: {e}')
+                logger.info(f"Navigation failed (Timeout is fine): {e}")
 
             # ---------- scroll & full-page capture ----------
             page = await mgr.get()
-            # await page.pause()
             for _ in range(3):
                 await page.keyboard.press("End")
                 await asyncio.sleep(random.uniform(1.0, 2.0))
@@ -489,8 +466,6 @@ async def capture_page_content_async(
             await asyncio.sleep(random.uniform(1.0, 2.0))
 
             try:
-                logger.debug(f"Start trying to collect info like Screenshots {target}")
-                logger.info("Reset CDP to the latest page")
                 page = await mgr.get()
                 cdp = await context.new_cdp_session(page)
                 metrics = await cdp.send("Page.getLayoutMetrics")
@@ -499,7 +474,6 @@ async def capture_page_content_async(
                 width = round(css_vp["clientWidth"])
                 height = round(min(css_content["height"], 6000))
                 scale = round(metrics.get("visualViewport", {}).get("scale", 1))
-                logger.info(f"Set device override to {width}, {height}, {scale}")
                 await cdp.send(
                     "Emulation.setDeviceMetricsOverride",
                     {
@@ -510,13 +484,11 @@ async def capture_page_content_async(
                     },
                 )
                 await asyncio.sleep(random.uniform(2.1, 3.2))
-                logger.info(f"Try to Capture Screenshot at {target}")
                 shot = await cdp.send(
                     "Page.captureScreenshot",
                     {"format": "png", "captureBeyondViewport": True},
                 )
                 screenshot_b64 = shot.get("data")
-                logger.info(f"Try to Capture TEXT at {target}")
                 text_res = await cdp.send(
                     "Runtime.evaluate",
                     {

@@ -84,12 +84,6 @@ class BaseEvaluator:
         else:
             return [{"type": "text", "text": prompt}]
 
-    # ---------------------------------------------------------------------
-    # Page info helper (shared by both subclasses)
-    # ---------------------------------------------------------------------
-
-
-
 
     async def get_page_info(self, url: str, cancellation_event: Optional[asyncio.Event] = None):
         """Return (screenshot_b64, page_text). Uses global cache + semaphore."""
@@ -198,7 +192,7 @@ class Extractor(BaseEvaluator):
     GENERAL RULES:
     1. Do not add, omit, or invent any information. Extract only information explicitly mentioned in the provided answer exactly as it appears.
     2. If any required information is missing from the answer, explicitly return `null` as the JSON value.
-    3. You will also receive the original task description as context. Understand it clearly, as it provides essential background for the extraction. You may apply common-sense reasoning to assist your extraction, but your final result must be accurately extracted from the answer text provided.
+    3. You will also receive the original task desc as context. Understand it clearly, as it provides essential background for the extraction. You may apply common-sense reasoning to assist your extraction, but your final result must be accurately extracted from the answer text provided.
     4. Occasionally, additional instructions might be provided to aid your extraction. Carefully follow those instructions when available.
     
     SPECIAL RULES FOR URL EXTRACTION:
@@ -212,7 +206,7 @@ class Extractor(BaseEvaluator):
     {extraction_prompt}
     ```
     
-    Here is the original task description:
+    Here is the original task desc:
     ```
     {task_description}
     ```
@@ -234,7 +228,7 @@ class Extractor(BaseEvaluator):
         GENERAL RULES:
         1. Do not add, omit, or invent any information. Only extract information explicitly mentioned in the provided answer as it appears.
         2. If any required information is missing from the answer, explicitly return `null` as the JSON value.
-        3. You will also receive the original task description as context. Understand it clearly, as it provides essential background for the extraction. You may apply common-sense reasoning to assist your extraction, but your final result must be accurately extracted from the webpage content provided.
+        3. You will also receive the original task desc as context. Understand it clearly, as it provides essential background for the extraction. You may apply common-sense reasoning to assist your extraction, but your final result must be accurately extracted from the webpage content provided.
         4. Occasionally, additional instructions might be provided to aid your extraction. Carefully follow those instructions when available.
 
         SPECIAL RULES FOR URL EXTRACTION:
@@ -249,7 +243,7 @@ class Extractor(BaseEvaluator):
         {extraction_prompt}
         ```
 
-        Here is the original task description:
+        Here is the original task desc:
         ```
         {task_description}
         ```
@@ -438,21 +432,21 @@ class Verifier(BaseEvaluator):
             You are responsible for verifying whether a given claim or simple statement is correct and accurate. Typically, this verification involves straightforward factual judgments or logical checks (e.g., verifying if a given name matches another given name). For context, we are evaluating the correctness of an answer to a web information-gathering task. This verification step helps us determine part of the answer’s accuracy. Your task is to provide a binary judgment ("Correct" or "Incorrect") along with clear and detailed reasoning supporting your decision.
 
             To assist your judgment, you will also receive:
-            - The original task description (as context).
+            - The original task desc (as context).
             - The complete answer to the task (as context).
             - Additional instructions (occasionally provided to guide your verification).
 
             GENERAL RULES:
             1. Carefully examine the provided claim or statement to verify. Use logic, common sense, or basic reasoning to determine its accuracy.
-            2. Clearly understand the provided task description and complete answer, as they offer important context that may help you better handle variations or edge cases.
-            3. Although we provided task description and the complete answer, you should still focus on the given verification itself. DO NOT conduct any extra verification beyond the claim itself (e.g., verify the URL provenance or any violation to your knowledge). Usually, the verification has been phrased into a very simple logical or factual statement or a simple check. In other words, you should only verify the correctness of the claim itself, do not get distracted by the task description or the complete answer.
-            4. Most of the time, the claim or statement has been phrased into a simple check. If that is the case, you should not rely on your own knowledge or memory about the name or fact itself because those can be false or hallucinated. Instead, you should rely on the provided description to verify the claim itself. The only exception is when you are explicitly asked to call your own knowledge or memory to conduct the verification.
+            2. Clearly understand the provided task desc and complete answer, as they offer important context that may help you better handle variations or edge cases.
+            3. Although we provided task desc and the complete answer, you should still focus on the given verification itself. DO NOT conduct any extra verification beyond the claim itself (e.g., verify the URL provenance or any violation to your knowledge). Usually, the verification has been phrased into a very simple logical or factual statement or a simple check. In other words, you should only verify the correctness of the claim itself, do not get distracted by the task desc or the complete answer.
+            4. Most of the time, the claim or statement has been phrased into a simple check. If that is the case, you should not rely on your own knowledge or memory about the name or fact itself because those can be false or hallucinated. Instead, you should rely on the provided desc to verify the claim itself. The only exception is when you are explicitly asked to call your own knowledge or memory to conduct the verification.
             5. Your reasoning must be explicit, concise, and directly support your binary judgment.
             6. Carefully follow any additional instructions provided. They are crucial for your verification.
             7. Often the time, it is to check whether something (e.g., a name) matches another thing (e.g., another name). In those cases, you should try your best to allow minor or reasonable variants (e.g., letter casing, minor spelling variations, with or without middle name, etc.) to be considered as a match. Don't be very strict about the exact match.
             8. If the task asks for a number, then reasonable variations or simplifications should be acceptable—for example, rounding 66.7 to 67.
 
-            Here is the original task description:
+            Here is the original task desc:
 
             ```
             {task_description}
@@ -480,15 +474,15 @@ class Verifier(BaseEvaluator):
 
                             GENERAL RULES:
                             1. The provided webpage content may be lengthy. Carefully examine the relevant sections of both the webpage text and the screenshot. Determine clearly whether the claim or "fact" exactly matches or is explicitly supported by the webpage content. If the information appears to be not able to find from the text, but more likely from the screenshot, please check the screenshot carefully.
-                            2. You will also receive the original task description and the complete answer as context. Understand them clearly, as they provide essential background for evaluating the claim. You may apply common-sense reasoning (e.g., fuzzy matching for names differing only in letter casing or minor spelling variations) to assist your judgment, but your final decision must primarily rely on explicit evidence from the webpage content provided. You should never rely on your own knowledge or memory because those can be false or hallucinated. Instead, you should rely on the information on the webpage. The only exception is when you are explicitly asked to call your own knowledge or memory to conduct the verification.
-                            3. Although we provided task description and the complete answer, you should still focus on the given verification itself. DO NOT conduct any extra verification beyond the claim itself. In other words, you should only verify the correctness of the claim itself, do not get distracted by the task description or the complete answer.
+                            2. You will also receive the original task desc and the complete answer as context. Understand them clearly, as they provide essential background for evaluating the claim. You may apply common-sense reasoning (e.g., fuzzy matching for names differing only in letter casing or minor spelling variations) to assist your judgment, but your final decision must primarily rely on explicit evidence from the webpage content provided. You should never rely on your own knowledge or memory because those can be false or hallucinated. Instead, you should rely on the information on the webpage. The only exception is when you are explicitly asked to call your own knowledge or memory to conduct the verification.
+                            3. Although we provided task desc and the complete answer, you should still focus on the given verification itself. DO NOT conduct any extra verification beyond the claim itself. In other words, you should only verify the correctness of the claim itself, do not get distracted by the task desc or the complete answer.
                             4. If the provided webpage (the URL source mentioned in the answer) is entirely irrelevant, invalid, or inaccessible, you should conclude that the claim or "fact" is not supported.
                             5. Carefully follow any additional instructions provided. They are crucial for your verification.
                             6. Your reasoning must be explicit, concise, and directly support your binary judgment.
                             7. Always allow minor or reasonable variants if the verification is related to some naming or titles (e.g., letter casing, minor spelling variations, with or without middle name, etc.). Don't be very strict about the exact match.
                             8. If the task asks for a number, then reasonable variations or simplifications should be acceptable—for example, rounding 66.7 to 67.
                             
-                            Here is the original task description:
+                            Here is the original task desc:
 
                             ```
                             {task_description}
@@ -606,7 +600,7 @@ class Verifier(BaseEvaluator):
         context = {
             "op_id": op_id,
             "verify_type": verify_type,
-            "node_id": node.id if node else None,
+            "id": node.id if node else None,
             "node_desc": node.desc if node else None,
             "claim": claim,
             "claim_preview": claim[:150] + "..." if len(claim) > 150 else claim,
@@ -698,7 +692,7 @@ class Verifier(BaseEvaluator):
             # Log final result
             status = "passed" if result else "failed"
 
-            # Build description
+            # Build desc
             description = node.desc if node else verify_context.get("claim_preview", "Verification")
             if verify_context.get("url"):
                 description += f" @ {verify_context['url']}"

@@ -14,10 +14,7 @@ from .utils.cache import CacheClass
 from .utils.logging_setup import create_logger, cleanup_logger
 from .utils.load_eval_script import load_eval_script
 
-
-# --------------------------------------------------------------------------- #
-# Path helpers                                                                #
-# --------------------------------------------------------------------------- #
+import re
 
 
 def _all_answer_paths(task_root: Path) -> List[Path]:
@@ -36,7 +33,7 @@ def _all_answer_paths(task_root: Path) -> List[Path]:
     return paths
 
 
-import re
+
 
 
 def _answer_base(answer_name: str) -> str:

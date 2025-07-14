@@ -32,7 +32,7 @@ class ColoredStructuredFormatter(logging.Formatter):
             ]
 
             # Add node information
-            if hasattr(record, 'node_id') and record.node_id:
+            if hasattr(record, 'id') and record.node_id:
                 msg_parts.append(f"Node({record.node_id})")
 
             # Add verification type
