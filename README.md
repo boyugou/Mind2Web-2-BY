@@ -123,16 +123,18 @@ Execute the evaluation using the `run_eval.py` script:
 
 ```bash
 # Evaluate all tasks for a specific agent
-python run_eval.py --agent_name <your_agent_name> --answer_folder answers
+python run_eval.py --agent_name <your_agent_name>
 
 # Evaluate a specific task
-python run_eval.py --agent_name <your_agent_name> --answer_folder answers --task_id <task_id>
+python run_eval.py --agent_name <your_agent_name> --task_id <task_id>
 ```
 
 for example:
 
 ```bash
-python run_eval.py --agent_name example --answer_folder answers --task_id yu_lineage
+python run_eval.py --agent_name example
+
+python run_eval.py --agent_name example --task_id yu_lineage
 ```
 
 #### Advanced Configuration

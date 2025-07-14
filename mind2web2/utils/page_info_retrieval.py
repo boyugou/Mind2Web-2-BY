@@ -149,11 +149,12 @@ async def capture_page_content_async(
         grant_permissions: bool = True,
 ) -> Tuple[Optional[str], Optional[str]]:
     # ----------- prepare persistent context dir -----------
-    if user_data_dir is None:
-        random_bytes = str(random.random()).encode("utf-8")
-        hash_prefix = hashlib.sha256(random_bytes).hexdigest()[:6]
-        user_data_dir = Path.cwd() / "tmp" / f"browser_context_{hash_prefix}"
-    user_data_dir.mkdir(parents=True, exist_ok=True)
+    # if user_data_dir is None:
+    #     random_bytes = str(random.random()).encode("utf-8")
+    #     hash_prefix = hashlib.sha256(random_bytes).hexdigest()[:6]
+    #     user_data_dir = Path.cwd() / "tmp" / f"browser_context_{hash_prefix}"
+    if user_data_dir:
+        user_data_dir.mkdir(parents=True, exist_ok=True)
 
     target = format_url(url)
 
@@ -166,32 +167,61 @@ async def capture_page_content_async(
 
     # Set location. Set Language to English
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=str(user_data_dir),
-            # channel="chrome",
-            locale='en-US',
-            headless=headless,
-            ignore_https_errors=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-web-security",
-                "--disable-site-isolation-trials",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--ignore-certificate-errors",
-                "--safebrowsing-disable-auto-save",
-                "--safebrowsing-disable-download-protection",
-                '--password-store=basic',
-                '--use-mock-keychain',
-            ],
-            extra_http_headers=headers,
-            viewport={
-                "width": random.randint(1050, 1150),
-                "height": random.randint(700, 800),
-            },
-        )
+        if user_data_dir:
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                locale='en-US',
+                headless=headless,
+                ignore_https_errors=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-site-isolation-trials",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--ignore-certificate-errors",
+                    "--safebrowsing-disable-auto-save",
+                    "--safebrowsing-disable-download-protection",
+                    '--password-store=basic',
+                    '--use-mock-keychain',
+                ],
+                extra_http_headers=headers,
+                viewport={
+                    "width": random.randint(1050, 1150),
+                    "height": random.randint(700, 800),
+                },
+            )
+            browser = None  # No separate browser object for persistent context
+        else:
+            browser = await p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-site-isolation-trials",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--ignore-certificate-errors",
+                    "--safebrowsing-disable-auto-save",
+                    "--safebrowsing-disable-download-protection",
+                    '--password-store=basic',
+                    '--use-mock-keychain',
+                ],
+            )
+            context = await browser.new_context(
+                locale='en-US',
+                ignore_https_errors=True,
+                extra_http_headers=headers,
+                viewport={
+                    "width": random.randint(1050, 1150),
+                    "height": random.randint(700, 800),
+                },
+            )
+
         if grant_permissions:
             try:
                 await context.grant_permissions(
@@ -285,6 +315,12 @@ async def capture_page_content_async(
                 await context.close()
             except Exception:
                 pass
+            # Close browser if it was created (non-persistent mode)
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
 
 
 

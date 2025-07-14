@@ -110,6 +110,7 @@ class BaseEvaluator:
                 early_stop = True
         if not early_stop:
             self.logger.info(f"⚠️⚠️⚠️ No Cache for {url}")
+            print(f"⚠️⚠️⚠️ No Cache for {url}")
             if await is_pdf(url):
 
                 try:
@@ -135,7 +136,7 @@ class BaseEvaluator:
                         screenshot_b64, page_text = await capture_page_content_async(
                             url,
                             self.logger,
-                            headless=False,
+                            headless=True,
                         )
                         self.cache.put_text(url, page_text)
                         self.cache.put_screenshot(url, screenshot_b64)
@@ -149,7 +150,7 @@ class BaseEvaluator:
                     screenshot_b64, page_text = await capture_page_content_async(
                         url,
                         self.logger,
-                        headless=False,
+                        headless=True,
                     )
                     self.cache.put_text(url, page_text)
                     self.cache.put_screenshot(url, screenshot_b64)
@@ -203,6 +204,12 @@ class Extractor(BaseEvaluator):
     2. If any required information is missing from the answer, explicitly return `null` as the JSON value.
     3. You will also receive the original task desc as context. Understand it clearly, as it provides essential background for the extraction. You may apply common-sense reasoning to assist your extraction, but your final result must be accurately extracted from the answer text provided.
     4. Occasionally, additional instructions might be provided to aid your extraction. Carefully follow those instructions when available.
+    
+    
+    SPECIAL RULES FOR URL SOURCES EXTRACTION:
+    – These rules apply when the request involves extraction of urls sources, for example, the source attribution for a statement.
+    1. The sources must be explicitly mentioned in the answer text as URLs. If the answer only provides a description of the source (e.g., "according to Wikipedia" or "as stated on example.com"), but does not provide an actual URL, return `null` for that source.
+    2. The sources can be presented in various formats, including plain URLs, markdown links (e.g., `[text](url)`), or embedded within sentences with a dedicated sources section. You must extract the actual URLs. As long as the URLs are presented in a reasonable format, you should be able to extract them.
     
     SPECIAL RULES FOR URL EXTRACTION:
     – These rules apply only when URL fields are required in the extraction.

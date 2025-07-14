@@ -255,7 +255,7 @@ async def evaluate_task(
     # ------------------------------------------------------------------
     answer_root = Path(answer_dir) / agent_name / task_id
     output_root = Path(output_dir)
-    cache_root = Path(cache_dir)
+    cache_root = Path(cache_dir) / agent_name
 
     output_root.mkdir(parents=True, exist_ok=True)
     cache_root.mkdir(parents=True, exist_ok=True)

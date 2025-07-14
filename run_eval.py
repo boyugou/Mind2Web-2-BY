@@ -42,11 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
                    default="openai", help="LLM provider to use")
 
     # Runtime options - Concurrency control
-    p.add_argument("--max_concurrent_tasks", type=int, default=2,
+    p.add_argument("--max_concurrent_tasks", type=int, default=3,
                    help="Maximum number of tasks to evaluate concurrently (default: 2)")
     p.add_argument("--max_concurrent_answers", type=int, default=3,
                    help="Maximum number of answers to evaluate concurrently per task (default: 3)")
-    p.add_argument("--max_webpage_retrieval", type=int, default=5,
+    p.add_argument("--max_webpage_retrieval", type=int, default=10,
                    help="Maximum number of concurrent webpage retrieval operations (playwright) (default: 5)")
     p.add_argument("--max_llm_requests", type=int, default=30,
                    help="Maximum number of concurrent LLM API requests (default: 30)")
@@ -108,16 +108,36 @@ async def evaluate_all_tasks(
         webpage_semaphore: asyncio.Semaphore,
         llm_semaphore: asyncio.Semaphore
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Evaluate all tasks in the eval_scripts directory with concurrent execution."""
+    """Evaluate all tasks based on available answers for the specified agent."""
     results = {}
 
-    # Find all task scripts
-    eval_scripts = list(paths.eval_scripts_root.glob("*.py"))
-    if not eval_scripts:
-        logging.warning(f"No evaluation scripts found in {paths.eval_scripts_root}")
+    # Find all task directories in the agent's answers folder
+    agent_dir = paths.answers_root / agent_name
+    if not agent_dir.exists():
+        logging.error(f"Agent directory not found: {agent_dir}")
+        return results
+    
+    # Get all task directories (subdirectories in agent folder)
+    task_dirs = [d for d in agent_dir.iterdir() if d.is_dir()]
+    if not task_dirs:
+        logging.warning(f"No task directories found in {agent_dir}")
         return results
 
-    logging.info(f"Found {len(eval_scripts)} evaluation scripts")
+    # Verify that corresponding eval scripts exist for each task
+    available_tasks = []
+    for task_dir in task_dirs:
+        task_id = task_dir.name
+        script_path = paths.default_script_for(task_id)
+        if script_path.exists():
+            available_tasks.append(task_id)
+        else:
+            logging.warning(f"No evaluation script found for task {task_id} at {script_path}")
+
+    if not available_tasks:
+        logging.warning(f"No tasks with both answers and evaluation scripts found")
+        return results
+
+    logging.info(f"Found {len(available_tasks)} tasks with answers for agent '{agent_name}'")
     logging.info(
         f"Concurrency: {args.max_concurrent_tasks} tasks, {args.max_concurrent_answers} answers/task, {args.max_webpage_retrieval} webpage ops, {args.max_llm_requests} LLM requests")
 
@@ -149,8 +169,7 @@ async def evaluate_all_tasks(
 
     # Create tasks for all evaluations
     tasks = []
-    for script_path in eval_scripts:
-        task_id = script_path.stem
+    for task_id in available_tasks:
         tasks.append(evaluate_task_with_semaphore(task_id))
 
     # Run all tasks concurrently with progress bar
